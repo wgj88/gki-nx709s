@@ -26,8 +26,16 @@ jobs:
                       /usr/local/share/powershell /usr/share/swift /usr/lib/jvm /opt/microsoft 2>/dev/null || true
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=none
-          sudo chmod 600 /swapfile && sudo mkswap /swapfile >/dev/null && sudo swapon /swapfile || echo "[warn] swapon failed"
+          ( sudo swapon --show || true )
+          for f in /swapfile /mnt/swapfile; do
+            if sudo dd if=/dev/zero of="$f" bs=1M count=8192 status=none 2>/dev/null; then
+              sudo chmod 600 "$f" && sudo mkswap "$f" >/dev/null 2>&1 && sudo swapon "$f" 2>/dev/null \
+                && { echo "[+] swap on $f"; break; } || echo "[warn] swapon $f failed"
+            else
+              echo "[warn] cannot create $f"
+            fi
+          done
+          free -m; df -h / | tail -1
           mkdir -p "$HOME/bin"
           curl -sSL -o "$HOME/bin/repo" https://storage.googleapis.com/git-repo-downloads/repo
           chmod +x "$HOME/bin/repo"
