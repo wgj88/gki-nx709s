@@ -1,0 +1,96 @@
+name: Build GKI 5.10.168 (android12-9) + KernelSU + Docker
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_tag:
+        description: "KernelSU tag"
+        default: "v3.3.0"
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 340
+    env:
+      KERNEL_SHA: 61344663df42
+      MANIFEST_BRANCH: common-android12-5.10-2023-05
+      KSU_TAG: ${{ github.event.inputs.ksu_tag }}
+    steps:
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git curl python3 rsync bc bison flex libssl-dev libelf-dev lz4 cpio kmod
+          mkdir -p "$HOME/bin"
+          curl -sSL -o "$HOME/bin/repo" https://storage.googleapis.com/git-repo-downloads/repo
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          git config --global user.name ci
+          git config --global user.email ci@example.com
+
+      - name: Sync toolchain manifest
+        run: |
+          mkdir -p ~/k && cd ~/k
+          repo init -u https://android.googlesource.com/kernel/manifest -b "$MANIFEST_BRANCH" --depth=1
+          repo sync -c --no-tags --no-clone-bundle -j"$(nproc)" --fail-fast
+          ls ~/k
+
+      - name: Pin exact kernel source (5.10.168)
+        run: |
+          cd ~/k
+          rm -rf common
+          curl -sSL -o /tmp/common.tar.gz "https://codeload.github.com/aosp-mirror/kernel_common/tar.gz/${KERNEL_SHA}"
+          tar xzf /tmp/common.tar.gz -C ~/k
+          mv ~/k/kernel_common-${KERNEL_SHA} ~/k/common
+          rm -f /tmp/common.tar.gz
+          sed -n '1,5p' ~/k/common/Makefile
+
+      - name: Integrate KernelSU and container configs
+        run: |
+          cd ~/k
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/${KSU_TAG}/kernel/setup.sh" -o /tmp/ksu_setup.sh
+          bash /tmp/ksu_setup.sh "${KSU_TAG}"
+          cat >> ~/k/common/arch/arm64/configs/gki_defconfig <<'EOF'
+          CONFIG_KSU=y
+          CONFIG_PID_NS=y
+          CONFIG_IPC_NS=y
+          CONFIG_SYSVIPC=y
+          CONFIG_SYSVIPC_SYSCTL=y
+          CONFIG_POSIX_MQUEUE=y
+          CONFIG_POSIX_MQUEUE_SYSCTL=y
+          CONFIG_USER_NS=y
+          CONFIG_CGROUP_DEVICE=y
+          CONFIG_CGROUP_PIDS=y
+          EOF
+          cat > ~/k/common/build.config.nx709s <<'EOF'
+          . ${ROOT_DIR}/${KERNEL_DIR}/build.config.gki.aarch64
+          POST_DEFCONFIG_CMDS=""
+          MAKE_GOALS="${MAKE_GOALS}
+          Image
+          "
+          FILES="${FILES}
+          arch/arm64/boot/Image
+          "
+          EOF
+          grep -E "CONFIG_(KSU|PID_NS|IPC_NS|POSIX_MQUEUE|SYSVIPC|USER_NS)=" ~/k/common/arch/arm64/configs/gki_defconfig
+
+      - name: Build kernel
+        run: |
+          cd ~/k
+          BUILD_CONFIG=common/build.config.nx709s build/build.sh
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p ~/stage
+          find ~/k/out -path "*arch/arm64/boot/Image" -exec cp {} ~/stage/Image \;
+          find ~/k/out -name "Image.lz4" -exec cp {} ~/stage/Image.lz4 \;
+          find ~/k/out -maxdepth 4 -name ".config" -exec cp {} ~/stage/config \;
+          ls -lh ~/stage
+          echo "=== config check ==="
+          grep -E "^(CONFIG_PID_NS|CONFIG_IPC_NS|CONFIG_POSIX_MQUEUE|CONFIG_KSU|CONFIG_SYSVIPC|CONFIG_USER_NS|CONFIG_CGROUP_DEVICE|CONFIG_CGROUP_PIDS)=" ~/stage/config
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gki-5.10.168-nx709s
+          path: ~/stage/*
+          retention-days: 30
