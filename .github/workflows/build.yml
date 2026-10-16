@@ -82,7 +82,10 @@ jobs:
         run: |
           cd ~/k
           # FULL LTO 会吃爆 8GB 内存/磁盘；改用 THIN LTO（保住 CFI_CLANG，KMI 符号 __cfi_slowpath 不被裁掉）
-          sed -i 's/^CONFIG_LTO_CLANG_FULL=y$/CONFIG_LTO_CLANG_THIN=y/' ~/k/common/arch/arm64/configs/gki_defconfig
+          # 保持与官方一致的 FULL LTO：官方内核与 287 个 vendor 模块都按 FULL LTO + CFI 构建，
+          # 换成 THIN 后实测开机无限重启。磁盘已清到 ~30GB 且挂了 8G swap，够跑 FULL LTO。
+          sed -i 's/^CONFIG_LTO_CLANG_THIN=y$/CONFIG_LTO_CLANG_FULL=y/' ~/k/common/arch/arm64/configs/gki_defconfig
+          grep -E "LTO" ~/k/common/arch/arm64/configs/gki_defconfig
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/${KSU_TAG}/kernel/setup.sh" -o /tmp/ksu_setup.sh
           bash /tmp/ksu_setup.sh "${KSU_TAG}"
           cat >> ~/k/common/arch/arm64/configs/gki_defconfig <<'EOF'
