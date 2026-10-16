@@ -1,26 +1,24 @@
-name: Build GKI 5.10.168 (android12-9) + KernelSU + Docker
+name: Build GKI 5.10.168 (android12-9) + Docker namespaces
 
 on:
   workflow_dispatch:
-    inputs:
-      ksu_tag:
-        description: "KernelSU tag"
-        default: "v3.3.0"
-        required: true
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        lto: [thin, full]
     env:
       KERNEL_SHA: 61344663df42
       MANIFEST_BRANCH: common-android12-5.10-2023-05
-      KSU_TAG: ${{ github.event.inputs.ksu_tag }}
     steps:
       - name: Install build deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq git curl python3 rsync bc bison flex libssl-dev libelf-dev lz4 cpio kmod
+          sudo apt-get install -y -qq git curl python3 rsync bc bison flex libssl-dev libelf-dev lz4 cpio kmod patch
           # runner 只有 ~4.6GB 可用磁盘 / 7.9GB 内存，清出空间并加 swap
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/google/chrome \
                       /usr/local/share/powershell /usr/share/swift /usr/lib/jvm /opt/microsoft 2>/dev/null || true
@@ -59,10 +57,7 @@ jobs:
           for p in $PROJECTS; do
             repo sync -c --no-tags --no-clone-bundle -j"$(nproc)" "$p" || echo "[warn] skip $p"
           done
-          echo "[*] 工具链检查:"
-          ls ~/k
           ls ~/k/build/build.sh || echo "[!] build.sh 缺失"
-          find ~/k/prebuilts-master/clang/host/linux-x86 -maxdepth 3 -name clang -type f | head -3
 
       - name: Pin exact kernel source (5.10.168)
         run: |
@@ -74,26 +69,27 @@ jobs:
           rm -f /tmp/common.tar.gz
           sed -n '1,5p' ~/k/common/Makefile
 
-      - name: Show runner resources
-        run: |
-          nproc; free -m; df -h / /home/runner 2>/dev/null | sort -u
-
-      - name: Integrate KernelSU and container configs
+      - name: Apply GKI docker/LXC patches (1orz/android-gki-custom)
         run: |
           cd ~/k
-          # FULL LTO 会吃爆 8GB 内存/磁盘；改用 THIN LTO（保住 CFI_CLANG，KMI 符号 __cfi_slowpath 不被裁掉）
-          # 保持与官方一致的 FULL LTO：官方内核与 287 个 vendor 模块都按 FULL LTO + CFI 构建，
-          # 换成 THIN 后实测开机无限重启。磁盘已清到 ~30GB 且挂了 8G swap，够跑 FULL LTO。
-          sed -i 's/^CONFIG_LTO_CLANG_THIN=y$/CONFIG_LTO_CLANG_FULL=y/' ~/k/common/arch/arm64/configs/gki_defconfig
-          grep -E "LTO" ~/k/common/arch/arm64/configs/gki_defconfig
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/${KSU_TAG}/kernel/setup.sh" -o /tmp/ksu_setup.sh
-          bash /tmp/ksu_setup.sh "${KSU_TAG}"
-          cat >> ~/k/common/arch/arm64/configs/gki_defconfig <<'EOF'
-          # 本机 KernelSU 是 LKM 模式（ramdisk 里 kernelsu.ko 由 init 加载）。
-          # 内置(=y) 与 LKM 路径冲突会开机重复重启；编成模块(=m) 又因 GKI 只导出
-          # KMI 白名单符号而 modpost 失败。故内核不带 KSU，ramdisk 原样保留 LKM。
-          # 注意 KSU 的 Kconfig 是 default y，不显式关掉就会被编成内置
-          # CONFIG_KSU is not set
+          git clone --depth 1 https://github.com/1orz/android-gki-custom.git gki-custom
+          ls gki-custom/patches/android12-5.10/
+          cd ~/k/common
+          for p in ~/k/gki-custom/patches/android12-5.10/*.patch; do
+            echo "--- applying $p"
+            git apply -v "$p" || patch -p1 --forward --batch -i "$p" || echo "[warn] 应用失败: $p"
+          done
+          echo "=== 校验补丁是否生效 ==="
+          grep -n "ANDROID_KABI_USE(1, unsigned long mq_bytes)" include/linux/sched/user.h || echo "[!] mq_bytes 补丁未生效"
+          grep -n "ANDROID_KABI_USE(6, struct sysv_sem sysvsem)" include/linux/sched.h || echo "[!] sysvsem 补丁未生效"
+          grep -n "return 1;" kernel/module.c | head -2
+
+      - name: Container configs (LTO=${{ matrix.lto }})
+        run: |
+          cd ~/k
+          DEF=~/k/common/arch/arm64/configs/gki_defconfig
+          # 命名空间/容器必需（官方这行是 not set）
+          cat >> "$DEF" <<'EOF'
           CONFIG_PID_NS=y
           CONFIG_IPC_NS=y
           CONFIG_SYSVIPC=y
@@ -103,7 +99,21 @@ jobs:
           CONFIG_USER_NS=y
           CONFIG_CGROUP_DEVICE=y
           CONFIG_CGROUP_PIDS=y
+          CONFIG_NETFILTER_XT_TARGET_CHECKSUM=y
+          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+          CONFIG_IP6_NF_NAT=y
+          CONFIG_IP6_NF_TARGET_MASQUERADE=y
           EOF
+          # LTO 模式：官方是 FULL，THIN 更省内存（本工作流两种都编）
+          if [ "${{ matrix.lto }}" = "thin" ]; then
+            sed -i 's/^CONFIG_LTO_CLANG_FULL=y$/CONFIG_LTO_CLANG_THIN=y/' "$DEF"
+          fi
+          grep -nE "LTO|^CONFIG_PID_NS" "$DEF"
+          # 内核不带 KernelSU：本机是 LKM 模式，内置会与 ramdisk 加载路径冲突
+          echo "# CONFIG_KSU is not set" >> "$DEF"
+
+      - name: Create build config (nx709s)
+        run: |
           cat > ~/k/common/build.config.nx709s <<'EOF'
           . ${ROOT_DIR}/${KERNEL_DIR}/build.config.gki.aarch64
           POST_DEFCONFIG_CMDS=""
@@ -114,30 +124,27 @@ jobs:
           arch/arm64/boot/Image
           "
           EOF
-          grep -E "CONFIG_(KSU|PID_NS|IPC_NS|POSIX_MQUEUE|SYSVIPC|USER_NS)=" ~/k/common/arch/arm64/configs/gki_defconfig
+          cat ~/k/common/build.config.nx709s
 
       - name: Build kernel
         run: |
           cd ~/k
           BUILD_CONFIG=common/build.config.nx709s build/build.sh
+          ls -l ~/k/out/android12-5.10/common/arch/arm64/boot/Image
 
       - name: Collect artifacts
         run: |
           mkdir -p ~/stage
           find ~/k/out -path "*arch/arm64/boot/Image" -exec cp {} ~/stage/Image \;
           find ~/k/out -name "Image.lz4" -exec cp {} ~/stage/Image.lz4 \;
-          find ~/k/out -name "kernelsu.ko" -exec cp {} ~/stage/kernelsu.ko \;
-          ls -l ~/stage/kernelsu.ko || echo "[!] kernelsu.ko 未找到"
           find ~/k/out -maxdepth 4 -name ".config" -exec cp {} ~/stage/config \;
           ls -lh ~/stage
           echo "=== config check ==="
-          if grep -q "^CONFIG_KSU=y" ~/stage/config; then
-            echo "[!] KSU 仍被内置（会与 LKM ramdisk 冲突），中止"; exit 1
-          fi
-          grep -E "^(CONFIG_PID_NS|CONFIG_IPC_NS|CONFIG_POSIX_MQUEUE|CONFIG_KSU|CONFIG_SYSVIPC|CONFIG_USER_NS|CONFIG_CGROUP_DEVICE|CONFIG_CGROUP_PIDS|CONFIG_CFI_CLANG|CONFIG_LTO_CLANG_THIN|CONFIG_LTO_CLANG_FULL|CONFIG_LTO_NONE)=" ~/stage/config
+          grep -E "^(CONFIG_PID_NS|CONFIG_IPC_NS|CONFIG_POSIX_MQUEUE|CONFIG_SYSVIPC|CONFIG_USER_NS|CONFIG_CGROUP_DEVICE|CONFIG_CGROUP_PIDS|CONFIG_KSU|CONFIG_LTO_CLANG_THIN|CONFIG_LTO_CLANG_FULL|CONFIG_CFI_CLANG)=" ~/stage/config
+          if grep -q "^CONFIG_KSU=y" ~/stage/config; then echo "[!] KSU 被内置，中止"; exit 1; fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: gki-5.10.168-nx709s
+          name: gki-5.10.168-nx709s-${{ matrix.lto }}
           path: ~/stage/*
           retention-days: 30
