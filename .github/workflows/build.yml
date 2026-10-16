@@ -86,9 +86,9 @@ jobs:
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/${KSU_TAG}/kernel/setup.sh" -o /tmp/ksu_setup.sh
           bash /tmp/ksu_setup.sh "${KSU_TAG}"
           cat >> ~/k/common/arch/arm64/configs/gki_defconfig <<'EOF'
-          # 本机 KernelSU 是 LKM 模式（ramdisk 里的 kernelsu.ko 由 init 加载），
-          # 内核里内置 KSU 会与这条路径冲突导致开机重复重启，故编成模块
-          CONFIG_KSU=m
+          # 本机 KernelSU 是 LKM 模式（ramdisk 里 kernelsu.ko 由 init 加载）。
+          # 内置(=y) 与 LKM 路径冲突会开机重复重启；编成模块(=m) 又因 GKI 只导出
+          # KMI 白名单符号而 modpost 失败。故内核不带 KSU，ramdisk 原样保留 LKM。
           CONFIG_PID_NS=y
           CONFIG_IPC_NS=y
           CONFIG_SYSVIPC=y
