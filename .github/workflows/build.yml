@@ -59,9 +59,15 @@ jobs:
           rm -f /tmp/common.tar.gz
           sed -n '1,5p' ~/k/common/Makefile
 
+      - name: Show runner resources
+        run: |
+          nproc; free -m; df -h / /home/runner 2>/dev/null | sort -u
+
       - name: Integrate KernelSU and container configs
         run: |
           cd ~/k
+          # 关闭 FULL LTO：4 核/16GB runner 上 full LTO 链接 vmlinux 会 OOM 打挂 runner
+          sed -i 's/^CONFIG_LTO_CLANG_FULL=y$/CONFIG_LTO_NONE=y/' ~/k/common/arch/arm64/configs/gki_defconfig
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/${KSU_TAG}/kernel/setup.sh" -o /tmp/ksu_setup.sh
           bash /tmp/ksu_setup.sh "${KSU_TAG}"
           cat >> ~/k/common/arch/arm64/configs/gki_defconfig <<'EOF'
