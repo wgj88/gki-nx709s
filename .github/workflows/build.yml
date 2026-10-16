@@ -21,6 +21,13 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq git curl python3 rsync bc bison flex libssl-dev libelf-dev lz4 cpio kmod
+          # runner 只有 ~4.6GB 可用磁盘 / 7.9GB 内存，清出空间并加 swap
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/google/chrome \
+                      /usr/local/share/powershell /usr/share/swift /usr/lib/jvm /opt/microsoft 2>/dev/null || true
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=none
+          sudo chmod 600 /swapfile && sudo mkswap /swapfile >/dev/null && sudo swapon /swapfile || echo "[warn] swapon failed"
           mkdir -p "$HOME/bin"
           curl -sSL -o "$HOME/bin/repo" https://storage.googleapis.com/git-repo-downloads/repo
           chmod +x "$HOME/bin/repo"
@@ -66,8 +73,8 @@ jobs:
       - name: Integrate KernelSU and container configs
         run: |
           cd ~/k
-          # 关闭 FULL LTO：4 核/16GB runner 上 full LTO 链接 vmlinux 会 OOM 打挂 runner
-          sed -i 's/^CONFIG_LTO_CLANG_FULL=y$/CONFIG_LTO_NONE=y/' ~/k/common/arch/arm64/configs/gki_defconfig
+          # FULL LTO 会吃爆 8GB 内存/磁盘；改用 THIN LTO（保住 CFI_CLANG，KMI 符号 __cfi_slowpath 不被裁掉）
+          sed -i 's/^CONFIG_LTO_CLANG_FULL=y$/CONFIG_LTO_CLANG_THIN=y/' ~/k/common/arch/arm64/configs/gki_defconfig
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/${KSU_TAG}/kernel/setup.sh" -o /tmp/ksu_setup.sh
           bash /tmp/ksu_setup.sh "${KSU_TAG}"
           cat >> ~/k/common/arch/arm64/configs/gki_defconfig <<'EOF'
@@ -107,7 +114,7 @@ jobs:
           find ~/k/out -maxdepth 4 -name ".config" -exec cp {} ~/stage/config \;
           ls -lh ~/stage
           echo "=== config check ==="
-          grep -E "^(CONFIG_PID_NS|CONFIG_IPC_NS|CONFIG_POSIX_MQUEUE|CONFIG_KSU|CONFIG_SYSVIPC|CONFIG_USER_NS|CONFIG_CGROUP_DEVICE|CONFIG_CGROUP_PIDS)=" ~/stage/config
+          grep -E "^(CONFIG_PID_NS|CONFIG_IPC_NS|CONFIG_POSIX_MQUEUE|CONFIG_KSU|CONFIG_SYSVIPC|CONFIG_USER_NS|CONFIG_CGROUP_DEVICE|CONFIG_CGROUP_PIDS|CONFIG_CFI_CLANG|CONFIG_LTO_CLANG_THIN|CONFIG_LTO_CLANG_FULL|CONFIG_LTO_NONE)=" ~/stage/config
 
       - uses: actions/upload-artifact@v4
         with:
