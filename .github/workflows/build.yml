@@ -28,12 +28,26 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@example.com
 
-      - name: Sync toolchain manifest
+      - name: Sync toolchain manifest (skip kernel/common)
         run: |
           mkdir -p ~/k && cd ~/k
           repo init -u https://android.googlesource.com/kernel/manifest -b "$MANIFEST_BRANCH" --depth=1
-          repo sync -c --no-tags --no-clone-bundle -j"$(nproc)" --fail-fast
+          PROJECTS=$(python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse('.repo/manifests/default.xml').getroot()
+          names = [p.get('name') for p in root.iter('project')
+                   if p.get('name') and p.get('name') != 'kernel/common']
+          print(' '.join(names))
+          PY
+          )
+          echo "[*] projects: $PROJECTS"
+          for p in $PROJECTS; do
+            repo sync -c --no-tags --no-clone-bundle -j"$(nproc)" "$p" || echo "[warn] skip $p"
+          done
+          echo "[*] 工具链检查:"
           ls ~/k
+          ls ~/k/build/build.sh || echo "[!] build.sh 缺失"
+          find ~/k/prebuilts-master/clang/host/linux-x86 -maxdepth 3 -name clang -type f | head -3
 
       - name: Pin exact kernel source (5.10.168)
         run: |
