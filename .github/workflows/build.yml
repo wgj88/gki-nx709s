@@ -86,7 +86,9 @@ jobs:
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/${KSU_TAG}/kernel/setup.sh" -o /tmp/ksu_setup.sh
           bash /tmp/ksu_setup.sh "${KSU_TAG}"
           cat >> ~/k/common/arch/arm64/configs/gki_defconfig <<'EOF'
-          CONFIG_KSU=y
+          # 本机 KernelSU 是 LKM 模式（ramdisk 里的 kernelsu.ko 由 init 加载），
+          # 内核里内置 KSU 会与这条路径冲突导致开机重复重启，故编成模块
+          CONFIG_KSU=m
           CONFIG_PID_NS=y
           CONFIG_IPC_NS=y
           CONFIG_SYSVIPC=y
@@ -119,6 +121,8 @@ jobs:
           mkdir -p ~/stage
           find ~/k/out -path "*arch/arm64/boot/Image" -exec cp {} ~/stage/Image \;
           find ~/k/out -name "Image.lz4" -exec cp {} ~/stage/Image.lz4 \;
+          find ~/k/out -name "kernelsu.ko" -exec cp {} ~/stage/kernelsu.ko \;
+          ls -l ~/stage/kernelsu.ko || echo "[!] kernelsu.ko 未找到"
           find ~/k/out -maxdepth 4 -name ".config" -exec cp {} ~/stage/config \;
           ls -lh ~/stage
           echo "=== config check ==="
